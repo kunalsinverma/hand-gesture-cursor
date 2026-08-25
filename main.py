@@ -1,6 +1,7 @@
 import cv2
 import mediapipe as mp
 import pyautogui
+import math
 
 # Performance optimizations for real-time mouse control
 pyautogui.PAUSE = 0
@@ -8,6 +9,19 @@ pyautogui.FAILSAFE = False
 
 # Get monitor's primary screen dimensions (e.g., 1920 x 1080)
 screen_width, screen_height = pyautogui.size()
+
+# Smoothing Configuration
+SMOOTHING_FACTOR = 0.25
+DEADZONE_PIXELS = 3.0
+
+# State variables to store the previous cursor position across frames
+prev_screen_x = 0.0
+prev_screen_y = 0.0
+is_first_detection = True
+
+# Grace period: ignore brief 1-2 frame motion blurs during fast movement
+HAND_LOST_THRESHOLD = 5
+frames_hand_lost = 0
 
 # Initialize MediaPipe Hands and Drawing modules
 mp_hands = mp.solutions.hands
@@ -49,6 +63,8 @@ while True:
 
     # If a hand is detected, draw the landmarks
     if results.multi_hand_landmarks:
+        frames_hand_lost = 0  # Reset counter because hand is visible
+
         for hand_landmarks in results.multi_hand_landmarks:
             # Draw the skeleton
             mp_drawing.draw_landmarks(
@@ -58,7 +74,6 @@ while True:
             )
 
             # Extract the 4 key anchor landmarks forming the palm polygon:
-            # Note: We must use .landmark[...] on the hand_landmarks object
             wrist = hand_landmarks.landmark[0]
             index_mcp = hand_landmarks.landmark[5]
             middle_mcp = hand_landmarks.landmark[9]
@@ -72,17 +87,44 @@ while True:
             palm_cam_x = int(palm_norm_x * frame_width)
             palm_cam_y = int(palm_norm_y * frame_height)
 
-            # Convert to Screen Coordinates (for our monitor)
-            screen_x = int(palm_norm_x * screen_width)
-            screen_y = int(palm_norm_y * screen_height)
+            # Raw target coordinates on screen
+            target_screen_x = palm_norm_x * screen_width
+            target_screen_y = palm_norm_y * screen_height
 
-            # Draw a solid cyan circle at the palm centroid
+            # Initialize previous position on first detection to avoid cursor jumping from (0,0)
+            if is_first_detection:
+                prev_screen_x = target_screen_x
+                prev_screen_y = target_screen_y
+                is_first_detection = False
+
+            # Calculate distance moved since last frame (Euclidean Distance)
+            distance_moved = math.hypot(target_screen_x - prev_screen_x, target_screen_y - prev_screen_y)
+
+            # Only update cursor if movement exceeds the deadzone threshold
+            if distance_moved > DEADZONE_PIXELS:
+                # Apply Exponential Moving Average (EMA) formula
+                smooth_screen_x = prev_screen_x + SMOOTHING_FACTOR * (target_screen_x - prev_screen_x)
+                smooth_screen_y = prev_screen_y + SMOOTHING_FACTOR * (target_screen_y - prev_screen_y)
+
+                # Move physical mouse cursor
+                pyautogui.moveTo(int(smooth_screen_x), int(smooth_screen_y))
+
+                # Update previous position for the next frame
+                prev_screen_x = smooth_screen_x
+                prev_screen_y = smooth_screen_y
+
+            # Draw visual indicator on webcam feed
             cv2.circle(frame, (palm_cam_x, palm_cam_y), 12, (255, 255, 0), cv2.FILLED)
 
-            # Move the actual physical mouse cursor to the target screen coordinates
-            pyautogui.moveTo(screen_x, screen_y)
-            
-    # Display the result
+    else:
+        # Increment lost counter when hand is missing
+        frames_hand_lost += 1
+
+        # Only reset when hand has genuinely left the camera (e.g. 5+ consecutive frames)
+        if frames_hand_lost > HAND_LOST_THRESHOLD:
+            is_first_detection = True
+
+
     cv2.imshow("Hand Detection", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
