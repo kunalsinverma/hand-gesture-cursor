@@ -1,6 +1,9 @@
 import cv2
 import math
+import time
 import mediapipe as mp
+from mediapipe.tasks.python import vision as mp_vision
+from mediapipe.tasks.python import BaseOptions
 import pyautogui
 
 # 1. PyAutoGUI Performance Optimization
@@ -29,16 +32,33 @@ is_first_detection = True
 HAND_LOST_THRESHOLD = 5
 frames_hand_lost = 0
 
-# 5. Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
+# 5. Initialize MediaPipe Tasks HandLandmarker
+# Download the model once (see instructions), keep it next to this script:
+#   https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+MODEL_PATH = "hand_landmarker.task"
 
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5
+HandLandmarker = mp_vision.HandLandmarker
+HandLandmarkerOptions = mp_vision.HandLandmarkerOptions
+VisionRunningMode = mp_vision.RunningMode
+
+options = HandLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=MODEL_PATH),
+    running_mode=VisionRunningMode.VIDEO,
+    num_hands=1,
+    min_hand_detection_confidence=0.7,
+    min_tracking_confidence=0.5,
 )
+landmarker = HandLandmarker.create_from_options(options)
+
+# Standard 21-point hand skeleton connections (used for drawing only)
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),          # index
+    (5, 9), (9, 10), (10, 11), (11, 12),     # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),   # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),  # pinky
+    (0, 17),
+]
 
 # Open webcam
 camera = cv2.VideoCapture(0)
@@ -50,6 +70,8 @@ if not camera.isOpened():
 def get_3d_distance(p1, p2):
     """Calculates 3D Euclidean distance between two MediaPipe landmarks."""
     return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2 + (p1.z - p2.z)**2)
+
+start_time = time.time()
 
 while True:
     success, frame = camera.read()
@@ -69,23 +91,30 @@ while True:
     cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), (0, 255, 255), 2)
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb_frame)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    timestamp_ms = int((time.time() - start_time) * 1000)
+    results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-    if results.multi_hand_landmarks:
+    if results.hand_landmarks:
         frames_hand_lost = 0
 
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(
-                frame,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS
-            )
+        for hand_landmarks in results.hand_landmarks:
+            # Draw skeleton
+            for start_idx, end_idx in HAND_CONNECTIONS:
+                p1 = hand_landmarks[start_idx]
+                p2 = hand_landmarks[end_idx]
+                pt1 = (int(p1.x * frame_width), int(p1.y * frame_height))
+                pt2 = (int(p2.x * frame_width), int(p2.y * frame_height))
+                cv2.line(frame, pt1, pt2, (0, 200, 0), 2)
+            for lm in hand_landmarks:
+                cx, cy = int(lm.x * frame_width), int(lm.y * frame_height)
+                cv2.circle(frame, (cx, cy), 3, (0, 0, 255), cv2.FILLED)
 
             # --- 1. Cursor Movement via Palm Centroid with Active Box Mapping ---
-            wrist = hand_landmarks.landmark[0]
-            index_mcp = hand_landmarks.landmark[5]
-            middle_mcp = hand_landmarks.landmark[9]
-            pinky_mcp = hand_landmarks.landmark[17]
+            wrist = hand_landmarks[0]
+            index_mcp = hand_landmarks[5]
+            middle_mcp = hand_landmarks[9]
+            pinky_mcp = hand_landmarks[17]
 
             palm_norm_x = (wrist.x + index_mcp.x + middle_mcp.x + pinky_mcp.x) / 4.0
             palm_norm_y = (wrist.y + index_mcp.y + middle_mcp.y + pinky_mcp.y) / 4.0
@@ -123,8 +152,8 @@ while True:
             cv2.circle(frame, (palm_cam_x, palm_cam_y), 10, (255, 255, 0), cv2.FILLED)
 
             # --- 2. 3D Pinch Click with Scale Normalization ---
-            thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-            index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+            thumb_tip = hand_landmarks[4]
+            index_tip = hand_landmarks[8]
 
             # 3D Distance between thumb & index
             pinch_dist_3d = get_3d_distance(thumb_tip, index_tip)
@@ -169,6 +198,4 @@ while True:
 # Clean up resources
 camera.release()
 cv2.destroyAllWindows()
-hands.close()
-
-
+landmarker.close()
